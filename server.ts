@@ -1,7 +1,8 @@
 import express from 'express';
 import http from 'http';
 import path from 'path';
-import { GoogleGenAI } from '@google/genai';
+import { WebSocketServer, WebSocket } from 'ws';
+import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import dotenv from 'dotenv';
 import { SYSTEM_INSTRUCTION_AMIT_PA } from './src/data/aiPersona';
 
@@ -109,6 +110,150 @@ app.post('/api/chat', async (req, res) => {
       res.end();
     }
   }
+});
+
+// ============================================================================
+// WebSocket Server for Live Voice Conversations (gemini-3.1-flash-live-preview)
+// ============================================================================
+const wss = new WebSocketServer({ server, path: '/api/live' });
+
+wss.on('connection', async (clientWs: WebSocket) => {
+  console.log('[Live API] Client connected to live voice WebSocket');
+
+  const ai = getGeminiClient();
+  if (!ai) {
+    clientWs.send(
+      JSON.stringify({
+        type: 'error',
+        message: 'GEMINI_API_KEY is not configured on the server. Please check environment variables.',
+      })
+    );
+    clientWs.close();
+    return;
+  }
+
+  let session: any = null;
+  let isClosing = false;
+
+  try {
+    session = await ai.live.connect({
+      model: 'gemini-3.1-flash-live-preview',
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: 'Zephyr' }, // Professional executive tone
+          },
+        },
+        systemInstruction: `${SYSTEM_INSTRUCTION_AMIT_PA}
+IMPORTANT: You are on a real-time live two-way voice call. You MUST speak in polite, natural, executive HINGLISH (conversational Hindi-English blend). Introduce yourself briefly as Aryan, Amit Sir's Personal Assistant at AS Realty Nagpur. Keep your voice responses concise, warm, and around 2 to 3 sentences so the conversation flows seamlessly like a natural phone call.`,
+        outputAudioTranscription: {},
+        inputAudioTranscription: {},
+      },
+      callbacks: {
+        onmessage: (message: LiveServerMessage) => {
+          if (isClosing || clientWs.readyState !== WebSocket.OPEN) return;
+
+          // Check for audio output (model audio is 24kHz raw PCM little-endian)
+          const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+          if (audio) {
+            clientWs.send(JSON.stringify({ type: 'audio', audio }));
+          }
+
+          // Check if interrupted by user
+          if (message.serverContent?.interrupted) {
+            clientWs.send(JSON.stringify({ type: 'interrupted', interrupted: true }));
+          }
+
+          // Check for text transcripts
+          const parts = message.serverContent?.modelTurn?.parts;
+          if (parts) {
+            for (const part of parts) {
+              if (part.text) {
+                clientWs.send(JSON.stringify({ type: 'text', text: part.text }));
+              }
+            }
+          }
+        },
+        onerror: (err: any) => {
+          console.error('[Live API Session Error]:', err);
+          if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.send(
+              JSON.stringify({
+                type: 'error',
+                message: err?.message || 'Live audio session encountered an error',
+              })
+            );
+          }
+        },
+        onclose: () => {
+          console.log('[Live API] Gemini Live session closed');
+          if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.send(JSON.stringify({ type: 'session_closed' }));
+          }
+        },
+      },
+    });
+
+    clientWs.send(
+      JSON.stringify({
+        type: 'ready',
+        message: 'Live voice connection established with Amit Sir’s Executive PA.',
+      })
+    );
+  } catch (err: any) {
+    console.error('[Live API Connection Failed]:', err);
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(
+        JSON.stringify({
+          type: 'error',
+          message: err?.message || 'Failed to initialize Gemini Live voice session.',
+        })
+      );
+      clientWs.close();
+    }
+    return;
+  }
+
+  // Handle client audio / messages from browser
+  clientWs.on('message', (raw) => {
+    if (!session) return;
+    try {
+      const data = JSON.parse(raw.toString());
+
+      if (data.type === 'audio' && data.audio) {
+        // Send PCM 16kHz audio data to Gemini Live API
+        session.sendRealtimeInput({
+          audio: {
+            data: data.audio,
+            mimeType: 'audio/pcm;rate=16000',
+          },
+        });
+      } else if (data.type === 'text' && data.text) {
+        session.sendRealtimeInput({
+          text: data.text,
+        });
+      }
+    } catch (e) {
+      console.error('[Live API] Failed to parse client message:', e);
+    }
+  });
+
+  clientWs.on('close', () => {
+    console.log('[Live API] Client disconnected from WebSocket');
+    isClosing = true;
+    if (session) {
+      try {
+        session.close();
+      } catch (e) {
+        // ignore
+      }
+    }
+  });
+
+  clientWs.on('error', (err) => {
+    console.error('[Live API Client WebSocket Error]:', err);
+  });
 });
 
 // Vite middleware in dev or static serving in production

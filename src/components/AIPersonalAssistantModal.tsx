@@ -8,7 +8,6 @@ import {
   Sparkles,
   X,
   Volume2,
-  VolumeX,
   MessageSquare,
   Radio,
   Calendar,
@@ -71,15 +70,24 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
   const [isSubmittingText, setIsSubmittingText] = useState(false);
   const [voiceQuickInput, setVoiceQuickInput] = useState('');
 
-  // Refs
-  const chatBottomRef = useRef<HTMLDivElement | null>(null);
-  const recognitionRef = useRef<any>(null);
-  const aiVolumeIntervalRef = useRef<any>(null);
-  const isVoiceConnectedRef = useRef(false);
-  const isMutedRef = useRef(false);
+  // Refs for WebSocket and Web Audio API
+  const wsRef = useRef<WebSocket | null>(null);
+  const inputAudioCtxRef = useRef<AudioContext | null>(null);
+  const outputAudioCtxRef = useRef<AudioContext | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const processorNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const nextStartTimeRef = useRef<number>(0);
+  const inputAnalyserRef = useRef<AnalyserNode | null>(null);
+  const outputAnalyserRef = useRef<AnalyserNode | null>(null);
+  const animFrameRef = useRef<number | null>(null);
 
-  isVoiceConnectedRef.current = isVoiceConnected;
+  const chatBottomRef = useRef<HTMLDivElement | null>(null);
+  const isMutedRef = useRef(false);
+  const isVoiceConnectedRef = useRef(false);
+
   isMutedRef.current = isMuted;
+  isVoiceConnectedRef.current = isVoiceConnected;
 
   // Auto-scroll chat
   useEffect(() => {
@@ -114,7 +122,368 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
     }
   }, [isOpen]);
 
-  // Helper: Core HTTP Streaming via fetch + ReadableStream chunk-by-chunk
+  // Continuous Audio Visualizer Animation Loop
+  const startVisualizerLoop = () => {
+    const updateLevels = () => {
+      // Analyze AI output audio
+      if (outputAnalyserRef.current) {
+        const dataArray = new Uint8Array(outputAnalyserRef.current.frequencyBinCount);
+        outputAnalyserRef.current.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i];
+        }
+        const avg = sum / (dataArray.length || 1);
+        const norm = Math.min(1, avg / 128);
+        setAiVolume(norm);
+        setIsAiSpeaking(norm > 0.05);
+      }
+
+      // Analyze user input audio
+      if (inputAnalyserRef.current && !isMutedRef.current) {
+        const dataArray = new Uint8Array(inputAnalyserRef.current.frequencyBinCount);
+        inputAnalyserRef.current.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i];
+        }
+        const avg = sum / (dataArray.length || 1);
+        const norm = Math.min(1, avg / 128);
+        setUserVolume(norm);
+        setIsUserSpeaking(norm > 0.08);
+      } else {
+        setUserVolume(0);
+        setIsUserSpeaking(false);
+      }
+
+      animFrameRef.current = requestAnimationFrame(updateLevels);
+    };
+
+    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    animFrameRef.current = requestAnimationFrame(updateLevels);
+  };
+
+  // Helper: Stop All Live Audio Sources & WebSocket Connection
+  const stopVoiceSession = () => {
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
+
+    // Stop active audio sources
+    for (const src of activeSourcesRef.current) {
+      try {
+        src.stop();
+      } catch (e) {
+        // ignore
+      }
+    }
+    activeSourcesRef.current = [];
+    nextStartTimeRef.current = 0;
+
+    // Disconnect mic stream
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((track) => track.stop());
+      micStreamRef.current = null;
+    }
+
+    // Disconnect script processor
+    if (processorNodeRef.current) {
+      processorNodeRef.current.disconnect();
+      processorNodeRef.current = null;
+    }
+
+    // Close Audio Contexts
+    if (inputAudioCtxRef.current) {
+      inputAudioCtxRef.current.close().catch(() => {});
+      inputAudioCtxRef.current = null;
+    }
+    if (outputAudioCtxRef.current) {
+      outputAudioCtxRef.current.close().catch(() => {});
+      outputAudioCtxRef.current = null;
+    }
+
+    // Close WebSocket
+    if (wsRef.current) {
+      try {
+        wsRef.current.close();
+      } catch (e) {
+        // ignore
+      }
+      wsRef.current = null;
+    }
+
+    setIsVoiceConnected(false);
+    setIsConnectingVoice(false);
+    setIsAiSpeaking(false);
+    setIsUserSpeaking(false);
+    setUserVolume(0);
+    setAiVolume(0);
+    setVoiceStatus('Call ended • Tap karke dubara connect karein');
+  };
+
+  // Helper: Play 24kHz raw PCM little-endian audio from Gemini Live API
+  const playIncomingPcmAudio = async (base64Data: string) => {
+    try {
+      const outCtx = outputAudioCtxRef.current;
+      if (!outCtx) return;
+
+      if (outCtx.state === 'suspended') {
+        await outCtx.resume();
+      }
+
+      const binaryString = atob(base64Data);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      const int16 = new Int16Array(bytes.buffer);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) {
+        float32[i] = int16[i] / 32768.0;
+      }
+
+      // Create audio buffer at 24,000 Hz (Gemini Live output standard)
+      const audioBuffer = outCtx.createBuffer(1, float32.length, 24000);
+      audioBuffer.copyToChannel(float32, 0);
+
+      const now = outCtx.currentTime;
+      if (nextStartTimeRef.current < now) {
+        nextStartTimeRef.current = now + 0.04;
+      }
+
+      const source = outCtx.createBufferSource();
+      source.buffer = audioBuffer;
+
+      if (outputAnalyserRef.current) {
+        source.connect(outputAnalyserRef.current);
+      } else {
+        source.connect(outCtx.destination);
+      }
+
+      source.start(nextStartTimeRef.current);
+      activeSourcesRef.current.push(source);
+      setIsAiSpeaking(true);
+      setVoiceStatus('Aryan bol rahe hain...');
+
+      source.onended = () => {
+        const idx = activeSourcesRef.current.indexOf(source);
+        if (idx !== -1) activeSourcesRef.current.splice(idx, 1);
+        if (activeSourcesRef.current.length === 0) {
+          setIsAiSpeaking(false);
+          setVoiceStatus('Call Active • Aap boliye (Aryan sun rahe hain)');
+        }
+      };
+
+      nextStartTimeRef.current += audioBuffer.duration;
+    } catch (err) {
+      console.warn('Failed to play incoming PCM audio:', err);
+    }
+  };
+
+  // Helper: Start Live WebSocket Voice Call
+  const startVoiceSession = async () => {
+    setVoiceError(null);
+    setIsConnectingVoice(true);
+    setVoiceStatus('Connecting WebSocket to Amit Sir’s Executive PA...');
+
+    try {
+      // 1. Request microphone access
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      micStreamRef.current = stream;
+
+      // 2. Setup AudioContexts
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const inputCtx = new AudioCtx();
+      inputAudioCtxRef.current = inputCtx;
+      if (inputCtx.state === 'suspended') {
+        await inputCtx.resume();
+      }
+
+      const outputCtx = new AudioCtx({ sampleRate: 24000 });
+      outputAudioCtxRef.current = outputCtx;
+      if (outputCtx.state === 'suspended') {
+        await outputCtx.resume();
+      }
+
+      // Setup Analyser nodes for waveform visualization
+      const inputAnalyser = inputCtx.createAnalyser();
+      inputAnalyser.fftSize = 256;
+      inputAnalyserRef.current = inputAnalyser;
+
+      const outputAnalyser = outputCtx.createAnalyser();
+      outputAnalyser.fftSize = 256;
+      outputAnalyser.connect(outputCtx.destination);
+      outputAnalyserRef.current = outputAnalyser;
+
+      // 3. Connect WebSocket to /api/live
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/api/live`;
+      console.log('[WebSocket Voice] Connecting to:', wsUrl);
+
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log('[WebSocket Voice] WebSocket connected');
+        setIsVoiceConnected(true);
+        setIsConnectingVoice(false);
+        setVoiceStatus('Live Call Connected • Aryan Sun Rahe Hain');
+
+        // Initial contextual prompt if property is active
+        if (selectedProperty) {
+          const initPrompt = `Client is currently viewing "${selectedProperty.name}" in ${selectedProperty.location}, ${selectedProperty.bhk}, ${selectedProperty.price}. Greet them politely in Hinglish as Aryan and ask if they'd like architectural details or a private VIP site visit with Amit Sir.`;
+          ws.send(JSON.stringify({ type: 'text', text: initPrompt }));
+        } else {
+          const initGreeting = `Introduce yourself warmly in fluent Hinglish as Aryan, Amit Sir's Executive Personal Assistant at AS Realty Nagpur. Ask how you can assist with Nagpur luxury apartments, NMRDA plots, or farmhouse land.`;
+          ws.send(JSON.stringify({ type: 'text', text: initGreeting }));
+        }
+
+        // Start visualizer loop
+        startVisualizerLoop();
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          // Audio chunk from Gemini Live
+          if (data.type === 'audio' && data.audio) {
+            playIncomingPcmAudio(data.audio);
+          }
+
+          // User interruption signal from Gemini Live
+          if (data.interrupted) {
+            for (const s of activeSourcesRef.current) {
+              try {
+                s.stop();
+              } catch (e) {}
+            }
+            activeSourcesRef.current = [];
+            nextStartTimeRef.current = 0;
+            setIsAiSpeaking(false);
+          }
+
+          // Text transcription
+          if (data.type === 'text' && data.text) {
+            setVoiceTranscript(`Aryan: "${data.text}"`);
+          }
+
+          if (data.type === 'error') {
+            setVoiceError(data.message || 'Live session error occurred');
+          }
+        } catch (e) {
+          console.error('[WebSocket Voice] Error parsing incoming message:', e);
+        }
+      };
+
+      ws.onerror = (event) => {
+        console.error('[WebSocket Voice] WebSocket error:', event);
+        setVoiceError('WebSocket connection error. Please check network connectivity.');
+        setIsConnectingVoice(false);
+      };
+
+      ws.onclose = () => {
+        console.log('[WebSocket Voice] WebSocket connection closed');
+        stopVoiceSession();
+      };
+
+      // 4. Capture microphone and stream 16kHz PCM to WebSocket
+      const micSource = inputCtx.createMediaStreamSource(stream);
+      micSource.connect(inputAnalyser);
+
+      const bufferSize = 2048;
+      const processor = inputCtx.createScriptProcessor(bufferSize, 1, 1);
+      processorNodeRef.current = processor;
+      inputAnalyser.connect(processor);
+      processor.connect(inputCtx.destination);
+
+      const inputSampleRate = inputCtx.sampleRate;
+      const targetSampleRate = 16000;
+      const ratio = inputSampleRate / targetSampleRate;
+
+      processor.onaudioprocess = (e) => {
+        if (isMutedRef.current || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+          return;
+        }
+
+        const channelData = e.inputBuffer.getChannelData(0);
+
+        // Downsample to 16,000 Hz 16-bit PCM little-endian
+        const outputLength = Math.round(channelData.length / ratio);
+        const pcm16 = new Int16Array(outputLength);
+        for (let i = 0; i < outputLength; i++) {
+          const srcIdx = Math.min(Math.floor(i * ratio), channelData.length - 1);
+          const sample = Math.max(-1, Math.min(1, channelData[srcIdx]));
+          pcm16[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+        }
+
+        // Convert to Base64
+        const bytes = new Uint8Array(pcm16.buffer);
+        let binary = '';
+        const chunkSize = 8192;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          const sub = bytes.subarray(i, i + chunkSize);
+          binary += String.fromCharCode.apply(null, sub as unknown as number[]);
+        }
+        const b64Audio = btoa(binary);
+
+        wsRef.current.send(JSON.stringify({ type: 'audio', audio: b64Audio }));
+      };
+    } catch (err: any) {
+      console.error('[WebSocket Voice] Start failed:', err);
+      setIsConnectingVoice(false);
+      setIsVoiceConnected(false);
+      if (err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError') {
+        setVoiceError('Microphone permission was denied. Please allow microphone access to use live voice.');
+      } else {
+        setVoiceError(err?.message || 'Failed to start Live Voice session. Please verify connection.');
+      }
+    }
+  };
+
+  // Helper: Send Text query directly to Gemini Live over WebSocket
+  const sendLiveTextMessage = (queryText: string) => {
+    if (!queryText.trim()) return;
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      // Interrupt current speech
+      for (const s of activeSourcesRef.current) {
+        try {
+          s.stop();
+        } catch (e) {}
+      }
+      activeSourcesRef.current = [];
+      nextStartTimeRef.current = 0;
+      setIsAiSpeaking(false);
+
+      setVoiceTranscript(`Aap: "${queryText}"`);
+      setVoiceStatus('Aryan poochh rahe hain...');
+
+      wsRef.current.send(JSON.stringify({ type: 'text', text: queryText }));
+    } else {
+      // Connect first if not connected
+      startVoiceSession().then(() => {
+        setTimeout(() => {
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'text', text: queryText }));
+          }
+        }, 800);
+      });
+    }
+  };
+
+  // Helper: Core HTTP Streaming for Text Advisory tab
   const streamChatQuery = async (
     query: string,
     historyList: Message[],
@@ -164,257 +533,6 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
 
     fullAccumulated += decoder.decode();
     return fullAccumulated;
-  };
-
-  // Helper: Synthesize speech for voice mode
-  const speakVoiceText = (text: string, onComplete?: () => void) => {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      if (onComplete) onComplete();
-      return;
-    }
-
-    window.speechSynthesis.cancel();
-
-    // Clean markdown bold or bullet symbols for natural spoken cadence
-    const cleanedText = text
-      .replace(/[*#_~`]/g, '')
-      .replace(/\n+/g, '. ')
-      .replace(/₹/g, 'Rupees ')
-      .trim();
-
-    if (!cleanedText) {
-      if (onComplete) onComplete();
-      return;
-    }
-
-    const utterance = new SpeechSynthesisUtterance(cleanedText);
-    utterance.rate = 1.05;
-    utterance.pitch = 1.0;
-
-    // Pick best Hindi / Indian English voice if available
-    const voices = window.speechSynthesis.getVoices();
-    const preferredVoice =
-      voices.find((v) => v.lang === 'hi-IN' || v.name.includes('Hindi')) ||
-      voices.find((v) => v.lang === 'en-IN' || v.name.includes('India')) ||
-      voices.find((v) => v.lang.startsWith('en')) ||
-      voices[0];
-
-    if (preferredVoice) {
-      utterance.voice = preferredVoice;
-    }
-
-    setIsAiSpeaking(true);
-
-    // Simulate animated waveform bars for AI speech
-    if (aiVolumeIntervalRef.current) clearInterval(aiVolumeIntervalRef.current);
-    aiVolumeIntervalRef.current = setInterval(() => {
-      setAiVolume(0.3 + Math.random() * 0.65);
-    }, 120);
-
-    utterance.onend = () => {
-      setIsAiSpeaking(false);
-      setAiVolume(0);
-      if (aiVolumeIntervalRef.current) clearInterval(aiVolumeIntervalRef.current);
-      if (onComplete) onComplete();
-      if (isVoiceConnectedRef.current) {
-        startListening();
-      }
-    };
-
-    utterance.onerror = (e) => {
-      console.warn('Speech synthesis ended with event:', e);
-      setIsAiSpeaking(false);
-      setAiVolume(0);
-      if (aiVolumeIntervalRef.current) clearInterval(aiVolumeIntervalRef.current);
-      if (onComplete) onComplete();
-      if (isVoiceConnectedRef.current) {
-        startListening();
-      }
-    };
-
-    window.speechSynthesis.speak(utterance);
-  };
-
-  // Helper: Stop Speech recognition and voice session
-  const stopVoiceSession = () => {
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-    }
-    if (aiVolumeIntervalRef.current) {
-      clearInterval(aiVolumeIntervalRef.current);
-    }
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (e) {
-        // ignore
-      }
-      recognitionRef.current = null;
-    }
-    setIsVoiceConnected(false);
-    setIsConnectingVoice(false);
-    setIsAiSpeaking(false);
-    setIsUserSpeaking(false);
-    setUserVolume(0);
-    setAiVolume(0);
-    setVoiceStatus('Call ended • Tap karke dubara connect karein');
-  };
-
-  // Helper: Start browser speech recognition
-  const startListening = () => {
-    if (!isVoiceConnectedRef.current || isMutedRef.current) return;
-
-    const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-
-    if (!SpeechRecognition) {
-      setVoiceStatus('Aap bol sakte hain ya neeche question tap karein');
-      return;
-    }
-
-    try {
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop();
-        } catch (e) {
-          // ignore
-        }
-      }
-
-      const recognition = new SpeechRecognition();
-      recognitionRef.current = recognition;
-      recognition.lang = 'hi-IN'; // Accepts Hinglish / Hindi & Indian English
-      recognition.continuous = false;
-      recognition.interimResults = true;
-
-      recognition.onstart = () => {
-        setIsUserSpeaking(true);
-        setUserVolume(0.4);
-        setVoiceStatus('Sun rahe hain... Aap boliye');
-      };
-
-      recognition.onresult = (event: any) => {
-        let interim = '';
-        let final = '';
-
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          if (event.results[i].isFinal) {
-            final += event.results[i][0].transcript;
-          } else {
-            interim += event.results[i][0].transcript;
-          }
-        }
-
-        const currentText = final || interim;
-        if (currentText) {
-          setVoiceTranscript(`Aap: "${currentText}"`);
-          setUserVolume(0.7 + Math.random() * 0.3);
-        }
-
-        if (final.trim()) {
-          handleVoiceUserQuery(final.trim());
-        }
-      };
-
-      recognition.onerror = (event: any) => {
-        console.warn('Speech recognition status:', event.error);
-        setIsUserSpeaking(false);
-        setUserVolume(0);
-        if (event.error === 'not-allowed') {
-          setVoiceError('Microphone permission blocked. Please enable microphone or use the tap prompts.');
-        } else if (isVoiceConnectedRef.current && !isAiSpeaking) {
-          setVoiceStatus('Aap bol sakte hain ya neeche question tap karein');
-        }
-      };
-
-      recognition.onend = () => {
-        setIsUserSpeaking(false);
-        setUserVolume(0);
-      };
-
-      recognition.start();
-    } catch (err) {
-      console.warn('Speech recognition start error:', err);
-      setVoiceStatus('Aap bol sakte hain ya neeche question tap karein');
-    }
-  };
-
-  // Helper: Process user spoken query in Voice Mode using HTTP streaming
-  const handleVoiceUserQuery = async (queryText: string) => {
-    if (!queryText.trim()) return;
-
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (e) {
-        // ignore
-      }
-    }
-
-    setIsUserSpeaking(false);
-    setUserVolume(0);
-    setVoiceStatus('Aryan soch rahe hain...');
-    setVoiceTranscript(`Aap: "${queryText}"`);
-
-    // Add to chat history
-    const userMsg: Message = {
-      id: `user-voice-${Date.now()}`,
-      role: 'user',
-      content: queryText,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      isVoice: true,
-    };
-
-    setMessages((prev) => [...prev, userMsg]);
-
-    try {
-      let streamedResponse = '';
-      setVoiceStatus('Aryan bol rahe hain...');
-
-      await streamChatQuery(queryText, messages, (_chunk, accumulated) => {
-        streamedResponse = accumulated;
-        setVoiceTranscript(`Aryan: "${accumulated.slice(0, 180)}..."`);
-      });
-
-      // Add assistant response to history
-      const assistantMsg: Message = {
-        id: `assistant-voice-${Date.now()}`,
-        role: 'assistant',
-        content: streamedResponse,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        isVoice: true,
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
-
-      // Speak response aloud
-      speakVoiceText(streamedResponse);
-    } catch (err: any) {
-      console.error('Voice stream error:', err);
-      const fallback = 'I apologize. For immediate assistance with Amit Sir’s portfolio, please WhatsApp Amit Sir directly.';
-      setVoiceTranscript(`Aryan: "${fallback}"`);
-      speakVoiceText(fallback);
-    }
-  };
-
-  // Helper: Start Live Voice Call (HTTP streaming & Web Audio)
-  const startVoiceSession = () => {
-    setVoiceError(null);
-    setIsConnectingVoice(true);
-    setVoiceStatus('Connecting to Amit Sir’s Executive PA...');
-
-    setTimeout(() => {
-      setIsVoiceConnected(true);
-      setIsConnectingVoice(false);
-      setVoiceStatus('Live Call Connected • Aryan Bol Rahe Hain');
-
-      // Aryan's initial welcome greeting
-      const welcomeSpeech = selectedProperty
-        ? `Namaste! Main Aryan hoon, Amit Sir ka Executive PA. Aap ${selectedProperty.name} dekh rahe hain. Iska pricing breakdown chahiye ya Amit Sir ke saath private VIP site visit coordinate kar doon?`
-        : 'Namaste! Main Aryan hoon, Amit Sir ka Executive Personal Assistant at AS Realty Nagpur. Aapko luxury penthouses, Besa NMRDA plots ya farmhouse land ke baare mein kya jaankari chahiye?';
-
-      setVoiceTranscript(`Aryan: "${welcomeSpeech}"`);
-      speakVoiceText(welcomeSpeech);
-    }, 400);
   };
 
   // Send Text Query in Chat Tab using HTTP Streaming chunk-by-chunk
@@ -503,7 +621,7 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                   </h3>
                   <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#C5A059]/20 text-[#E6C687] border border-[#C5A059]/40 uppercase tracking-wider">
                     <Sparkles className="w-2.5 h-2.5 text-[#E6C687]" />
-                    Nagpur Property Expert
+                    WebSocket Live Voice
                   </span>
                 </div>
                 <p className="text-xs text-slate-300 flex items-center gap-1.5 mt-0.5">
@@ -538,7 +656,7 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                 <Radio className={`w-3.5 h-3.5 ${activeTab === 'voice' ? 'text-[#002347]' : 'text-[#C5A059]'}`} />
                 <span>Live Voice Call</span>
                 <span className="text-[9px] px-1.5 py-0.5 rounded bg-black/25 text-white font-mono uppercase">
-                  AI Voice
+                  WebSocket
                 </span>
               </button>
 
@@ -564,7 +682,7 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
           </div>
         </div>
 
-        {/* Modal Body: Voice Call View */}
+        {/* Modal Body: Voice Call View (WebSocket Duplex Live Voice) */}
         {activeTab === 'voice' && (
           <div className="flex-1 flex flex-col items-center justify-between p-5 sm:p-7 bg-gradient-to-b from-slate-50 to-[#F8F9FA] overflow-y-auto">
             {/* Status Header */}
@@ -588,7 +706,7 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                 Amit Sir ke PA se Live Voice Call
               </h4>
               <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                Powered by Gemini 3.8 Flash HTTP Streaming. Center orb par <strong className="text-[#002347]">Tap karein</strong> aur directly Hinglish mein Nagpur properties, plots, ya VIP site visit ke baare mein baat karein.
+                Powered by Gemini Live WebSocket Audio. Center orb par <strong className="text-[#002347]">Tap karein</strong> aur directly Hinglish mein Nagpur properties, plots, ya VIP site visit ke baare mein baat karein.
               </p>
             </div>
 
@@ -630,13 +748,19 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                     if (!isVoiceConnected) {
                       startVoiceSession();
                     } else if (isAiSpeaking) {
-                      // Interrupt Aryan and listen immediately
-                      window.speechSynthesis.cancel();
+                      // Interrupt Aryan immediately
+                      for (const s of activeSourcesRef.current) {
+                        try {
+                          s.stop();
+                        } catch (e) {}
+                      }
+                      activeSourcesRef.current = [];
+                      nextStartTimeRef.current = 0;
                       setIsAiSpeaking(false);
                       setAiVolume(0);
-                      startListening();
                     } else {
-                      startListening();
+                      // Toggle mute or signal speech
+                      setIsMuted(!isMuted);
                     }
                   }}
                   disabled={isConnectingVoice}
@@ -645,7 +769,7 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                       ? 'Tap karein Amit Sir ke PA se call start karne ke liye'
                       : isAiSpeaking
                       ? 'Tap to interrupt Aryan'
-                      : 'Tap to speak'
+                      : 'Tap to toggle mute'
                   }
                   className={`w-32 h-32 sm:w-36 sm:h-36 rounded-full border-4 shadow-2xl flex flex-col items-center justify-center transition-all duration-300 relative z-10 select-none cursor-pointer ${
                     isAiSpeaking
@@ -669,7 +793,7 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                       <span className="text-[10px] uppercase font-bold tracking-widest mt-1 text-slate-200">
                         {isMuted ? 'Muted' : isUserSpeaking ? 'Sun Rahe Hain...' : 'Aap Boliye'}
                       </span>
-                      <span className="text-[9px] text-[#C5A059]">Tap to Speak</span>
+                      <span className="text-[9px] text-[#C5A059]">{isMuted ? 'Tap to Unmute' : 'Tap to Mute'}</span>
                     </>
                   ) : isConnectingVoice ? (
                     <>
@@ -688,7 +812,7 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                         Tap to Call
                       </span>
                       <span className="text-[10px] font-medium text-[#E6C687] tracking-tight">
-                        Baat Shuru Karein
+                        WebSocket Voice
                       </span>
                     </>
                   )}
@@ -731,7 +855,7 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
               {/* One-tap voice prompt chips while on call */}
               {isVoiceConnected && (
                 <div className="mt-3 flex flex-wrap items-center justify-center gap-1.5 max-w-md">
-                  <span className="text-[10px] uppercase font-bold text-slate-400 mr-1">Bolne ke liye tap karein:</span>
+                  <span className="text-[10px] uppercase font-bold text-slate-400 mr-1">Ask Aryan directly:</span>
                   {[
                     'Dharampeth Penthouses',
                     'Besa NMRDA Plots',
@@ -740,7 +864,7 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                   ].map((quickQ) => (
                     <button
                       key={quickQ}
-                      onClick={() => handleVoiceUserQuery(quickQ)}
+                      onClick={() => sendLiveTextMessage(quickQ)}
                       className="text-[11px] px-2.5 py-1 rounded-full bg-slate-100 hover:bg-[#002347] hover:text-white text-slate-700 border border-slate-200 transition-all cursor-pointer"
                     >
                       {quickQ}
@@ -749,13 +873,13 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                 </div>
               )}
 
-              {/* Quick Text Input Fallback if microphone not supported */}
+              {/* Quick Text Input Fallback */}
               {isVoiceConnected && (
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
                     if (voiceQuickInput.trim()) {
-                      handleVoiceUserQuery(voiceQuickInput);
+                      sendLiveTextMessage(voiceQuickInput);
                       setVoiceQuickInput('');
                     }
                   }}
@@ -765,13 +889,13 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                     type="text"
                     value={voiceQuickInput}
                     onChange={(e) => setVoiceQuickInput(e.target.value)}
-                    placeholder="Ya yahan Hinglish mein type karke Aryan se poochhein..."
+                    placeholder="Ya yahan Hinglish mein type karein Aryan ke liye..."
                     className="flex-1 px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs text-slate-800 focus:outline-none focus:border-[#C5A059]"
                   />
                   <button
                     type="submit"
                     className="p-2 rounded-xl bg-[#002347] text-[#E6C687] hover:bg-[#001730] transition-colors cursor-pointer"
-                    title="Speak this question"
+                    title="Send to Aryan via WebSocket"
                   >
                     <CornerDownLeft className="w-3.5 h-3.5" />
                   </button>
@@ -807,12 +931,12 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                   {isConnectingVoice ? (
                     <>
                       <RefreshCw className="w-4 h-4 animate-spin" />
-                      <span>Connecting Live Audio...</span>
+                      <span>Connecting WebSocket Audio...</span>
                     </>
                   ) : (
                     <>
                       <PhoneCall className="w-4 h-4" />
-                      <span>Tap to Call Amit Sir's PA</span>
+                      <span>Tap to Call Amit Sir's PA (WebSocket)</span>
                     </>
                   )}
                 </button>
@@ -854,7 +978,7 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
           </div>
         )}
 
-        {/* Modal Body: Text Chat View with HTTP Streaming */}
+        {/* Modal Body: Text Chat View */}
         {activeTab === 'chat' && (
           <div className="flex-1 flex flex-col justify-between bg-[#F8F9FA] overflow-hidden">
             {/* Messages Scroll Area */}
