@@ -1,0 +1,10 @@
+{
+  "name": "AS Realty",
+  "description": "Premier luxury real estate advisory for AS Realty in Nagpur, owned by Amit Shivpeth, featuring an AI Property Expert and Executive PA to Amit Sir with real-time Live voice and chat conversations, luxury residences, sanctioned plots, and VIP site visit bookings.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
