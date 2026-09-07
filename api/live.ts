@@ -1,10 +1,20 @@
-export default function handler(req: any, res: any) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.status(200).json({
-    status: 'notice',
-    message:
-      'Vercel Serverless Functions do not support persistent stateful WebSockets. For live audio WebSockets with gemini-3.1-flash-live-preview, run the dedicated websocket-server.ts on Railway, Render, Fly.io, or Cloud Run, and set VITE_WEBSOCKET_URL in your Vercel environment variables. The AS Realty frontend automatically uses intelligent Voice Fallback Mode via /api/chat when WebSockets are unavailable.',
-    recommendedWebsocketServer: 'websocket-server.ts',
-    voiceFallbackAvailable: true,
-  });
+export const config = {
+  runtime: 'edge', // This forces Vercel to use the ultra-fast Edge runtime
+};
+
+export default async function handler(req: Request) {
+  // 1. Get the Google AI Studio API Key safely from Vercel's environment variables
+  const apiKey = process.env.GEMINI_API_KEY;
+  const geminiWsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+
+  // 2. Establish the secure bridge to Google
+  try {
+    const response = await fetch(geminiWsUrl, {
+      headers: req.headers,
+    });
+
+    return response;
+  } catch (error) {
+    return new Response('Failed to connect to Google Live Stream', { status: 500 });
+  }
 }
