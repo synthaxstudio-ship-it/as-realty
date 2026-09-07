@@ -2,15 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   Menu,
   X,
-  Phone,
-  MessageSquare,
   Building,
   ShieldCheck,
   ChevronRight,
   Instagram,
   Radio,
   Sparkles,
-  Database,
   User as UserIcon,
   LogOut,
   ChevronDown,
@@ -141,17 +138,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span className="hidden md:inline">Follow us</span>
           </a>
 
-          <a
-            href={`https://wa.me/${COMPANY_DETAILS.whatsappNumber}?text=${encodeURIComponent('Hello AS Realty, I am interested in inquiring about your luxury property portfolio.')}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-[#001730] border border-[#C5A059]/40 hover:border-[#C5A059] text-xs font-semibold text-slate-200 transition-all"
-            title="Chat directly on WhatsApp"
-          >
-            <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
-            <span>{COMPANY_DETAILS.phoneDisplay}</span>
-          </a>
-
           <button
             id="nav-contact-us-button"
             onClick={() => onOpenBooking()}
@@ -160,18 +146,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             <Building className="w-3.5 h-3.5 text-[#002347]" />
             <span>Meeting</span>
           </button>
-
-          {onOpenSupabase && (
-            <button
-              id="nav-supabase-desk-btn"
-              onClick={onOpenSupabase}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#001730] border border-emerald-500/40 hover:border-emerald-400 text-xs font-semibold text-emerald-300 hover:text-white transition-all cursor-pointer"
-              title="Open Supabase CRM Desk"
-            >
-              <Database className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="hidden lg:inline">Supabase CRM</span>
-            </button>
-          )}
 
           {/* VIP Client Auth Button / Dropdown */}
           {user ? (
@@ -221,19 +195,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                       <Building className="w-3.5 h-3.5 text-[#C5A059]" />
                       <span>Schedule VIP Site Visit</span>
                     </button>
-
-                    {onOpenSupabase && (
-                      <button
-                        onClick={() => {
-                          setUserDropdownOpen(false);
-                          onOpenSupabase();
-                        }}
-                        className="w-full px-4 py-2 text-left text-xs font-medium hover:bg-slate-50 flex items-center gap-2.5 text-slate-700 cursor-pointer"
-                      >
-                        <Database className="w-3.5 h-3.5 text-emerald-600" />
-                        <span>Supabase CRM Desk</span>
-                      </button>
-                    )}
 
                     <div className="border-t border-slate-100 my-1" />
 
@@ -323,16 +284,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
 
             <a
-              href={`https://wa.me/${COMPANY_DETAILS.whatsappNumber}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-sm"
-            >
-              <MessageSquare className="w-4 h-4" />
-              <span>Direct WhatsApp: {COMPANY_DETAILS.phoneDisplay}</span>
-            </a>
-
-            <a
               id="mobile-nav-instagram-button"
               href="https://www.instagram.com/asrealty.official?igsi=MXhteGNhM3Y0YjBmcg=="
               target="_blank"
@@ -342,19 +293,6 @@ export const Navbar: React.FC<NavbarProps> = ({
               <Instagram className="w-4 h-4 text-[#E6C687]" />
               <span>Follow us on Instagram (@asrealty.official)</span>
             </a>
-
-            {onOpenSupabase && (
-              <button
-                onClick={() => {
-                  setMobileMenuOpen(false);
-                  onOpenSupabase();
-                }}
-                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-[#001730] border border-emerald-500/40 text-emerald-300 font-semibold text-xs"
-              >
-                <Database className="w-4 h-4 text-emerald-400" />
-                <span>Supabase CRM &amp; Database Desk</span>
-              </button>
-            )}
 
             {/* Mobile Auth Button */}
             {user ? (

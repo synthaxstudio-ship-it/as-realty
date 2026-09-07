@@ -55,6 +55,7 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
   const [isUserSpeaking, setIsUserSpeaking] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [isFallbackVoiceMode, setIsFallbackVoiceMode] = useState(false);
 
   // Text chat state
   const [messages, setMessages] = useState<Message[]>([
@@ -85,9 +86,13 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
   const chatBottomRef = useRef<HTMLDivElement | null>(null);
   const isMutedRef = useRef(false);
   const isVoiceConnectedRef = useRef(false);
+  const speechRecognitionRef = useRef<any>(null);
+  const isSpeakingFallbackRef = useRef(false);
+  const isFallbackVoiceModeRef = useRef(false);
 
   isMutedRef.current = isMuted;
   isVoiceConnectedRef.current = isVoiceConnected;
+  isFallbackVoiceModeRef.current = isFallbackVoiceMode;
 
   // Auto-scroll chat
   useEffect(() => {
@@ -203,6 +208,19 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
       outputAudioCtxRef.current = null;
     }
 
+    // Stop Web Speech Synthesis & Recognition
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.stop();
+      } catch (e) {}
+      speechRecognitionRef.current = null;
+    }
+    isSpeakingFallbackRef.current = false;
+    setIsFallbackVoiceMode(false);
+
     // Close WebSocket
     if (wsRef.current) {
       try {
@@ -283,11 +301,198 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
     }
   };
 
-  // Helper: Start Live WebSocket Voice Call
+  // Helper: Core HTTP Streaming for Text Advisory tab and Fallback Voice Mode
+  const streamChatQuery = async (
+    query: string,
+    historyList: Message[],
+    onChunk: (chunk: string, accumulated: string) => void
+  ): Promise<string> => {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: query,
+        history: historyList.slice(-6).map((m) => ({ role: m.role, content: m.content })),
+        propertyContext: selectedProperty
+          ? `${selectedProperty.name} in ${selectedProperty.location}, ${selectedProperty.bhk}, ${selectedProperty.price}`
+          : undefined,
+      }),
+    });
+
+    if (!response.ok) {
+      let errMsg = 'Failed to connect to Amit Sir’s PA.';
+      try {
+        const errJson = await response.json();
+        if (errJson?.error) errMsg = errJson.error;
+      } catch (e) {
+        const errTxt = await response.text().catch(() => '');
+        if (errTxt) errMsg = errTxt;
+      }
+      throw new Error(errMsg);
+    }
+
+    if (!response.body) {
+      const text = await response.text();
+      onChunk(text, text);
+      return text;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let fullAccumulated = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      fullAccumulated += chunk;
+      onChunk(chunk, fullAccumulated);
+    }
+
+    fullAccumulated += decoder.decode();
+    return fullAccumulated;
+  };
+
+  // Helper: Speak text using Browser Speech Synthesis in Fallback Voice Mode
+  const speakFallbackAudio = (text: string, onEnd?: () => void) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) {
+      onEnd?.();
+      return;
+    }
+
+    try {
+      window.speechSynthesis.cancel();
+      const cleanText = text.replace(/[*_#`~[\]]/g, '').trim();
+      const utterance = new SpeechSynthesisUtterance(cleanText);
+      utterance.lang = 'hi-IN';
+
+      const voices = window.speechSynthesis.getVoices();
+      const preferredVoice = voices.find(
+        (v) => v.lang.startsWith('hi') || v.lang.includes('IN') || v.name.includes('India')
+      );
+      if (preferredVoice) {
+        utterance.voice = preferredVoice;
+      }
+      utterance.rate = 1.02;
+      utterance.pitch = 0.96;
+
+      utterance.onstart = () => {
+        setIsAiSpeaking(true);
+        isSpeakingFallbackRef.current = true;
+        setAiVolume(0.75);
+        setVoiceStatus('Aryan bol rahe hain...');
+      };
+
+      utterance.onend = () => {
+        setIsAiSpeaking(false);
+        isSpeakingFallbackRef.current = false;
+        setAiVolume(0);
+        setVoiceStatus('Call Active • Aap boliye (Aryan sun rahe hain)');
+        if (onEnd) onEnd();
+      };
+
+      utterance.onerror = (e) => {
+        console.warn('Speech synthesis note:', e);
+        setIsAiSpeaking(false);
+        isSpeakingFallbackRef.current = false;
+        setAiVolume(0);
+        if (onEnd) onEnd();
+      };
+
+      window.speechSynthesis.speak(utterance);
+    } catch (e) {
+      console.warn('Error in speakFallbackAudio:', e);
+      if (onEnd) onEnd();
+    }
+  };
+
+  // Helper: Speech Recognition listening in Fallback Voice Mode
+  const startFallbackVoiceListening = () => {
+    const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRec) {
+      setVoiceStatus('Voice mode active • Aap prompt chips ya quick input use kar sakte hain');
+      return;
+    }
+
+    try {
+      if (speechRecognitionRef.current) {
+        try {
+          speechRecognitionRef.current.stop();
+        } catch (e) {}
+      }
+
+      const recognition = new SpeechRec();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.lang = 'hi-IN';
+
+      recognition.onresult = async (event: any) => {
+        if (isSpeakingFallbackRef.current || isMutedRef.current) return;
+        const current = event.resultIndex;
+        const transcript = event.results[current][0].transcript;
+        if (!transcript || !transcript.trim()) return;
+
+        setVoiceTranscript(`Aap: "${transcript}"`);
+        setVoiceStatus('Aryan soch rahe hain...');
+        setIsUserSpeaking(true);
+        setTimeout(() => setIsUserSpeaking(false), 900);
+
+        try {
+          const aiResponse = await streamChatQuery(transcript, messages, (chunk, acc) => {
+            setVoiceTranscript(`Aryan: "${acc}"`);
+          });
+
+          speakFallbackAudio(aiResponse);
+        } catch (err: any) {
+          console.warn('Voice query error:', err);
+          speakFallbackAudio('Maaf kijiye, connection issue aaya. Main dobara sun raha hoon, boliye?');
+        }
+      };
+
+      recognition.onerror = (e: any) => {
+        console.warn('SpeechRecognition event:', e?.error);
+      };
+
+      recognition.onend = () => {
+        if (isVoiceConnectedRef.current && isFallbackVoiceModeRef.current && !isSpeakingFallbackRef.current) {
+          try {
+            recognition.start();
+          } catch (e) {}
+        }
+      };
+
+      speechRecognitionRef.current = recognition;
+      recognition.start();
+    } catch (e) {
+      console.warn('SpeechRecognition startup note:', e);
+    }
+  };
+
+  // Helper: Activate Voice Fallback Mode (Runs smoothly on Vercel Serverless)
+  const startFallbackVoiceSession = async () => {
+    setIsFallbackVoiceMode(true);
+    isFallbackVoiceModeRef.current = true;
+    setIsVoiceConnected(true);
+    setIsConnectingVoice(false);
+    setVoiceError(null);
+    setVoiceStatus('Live Call Connected (Voice Mode) • Aryan Sun Rahe Hain');
+    startVisualizerLoop();
+
+    const greeting = selectedProperty
+      ? `Namaste! Main Aryan hoon, Amit Sir ka Executive PA. Main dekh raha hoon aap ${selectedProperty.name} dekh rahe hain. Is project ke baare mein aapko pricing, MahaRERA clearance ya VIP visit ki jaankari chahiye?`
+      : `Namaste! Main Aryan hoon, Amit Sir ka Executive PA at AS Realty Nagpur. Aapko luxury residences, NMRDA plots ya farmhouse land ke baare mein guidance chahiye?`;
+
+    setVoiceTranscript(`Aryan: "${greeting}"`);
+    speakFallbackAudio(greeting, () => {
+      startFallbackVoiceListening();
+    });
+  };
+
+  // Helper: Start Live WebSocket Voice Call (with seamless Vercel fallback)
   const startVoiceSession = async () => {
     setVoiceError(null);
     setIsConnectingVoice(true);
-    setVoiceStatus('Connecting WebSocket to Amit Sir’s Executive PA...');
+    setVoiceStatus('Connecting to Amit Sir’s Executive PA...');
 
     try {
       // 1. Request microphone access
@@ -326,16 +531,37 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
       outputAnalyser.connect(outputCtx.destination);
       outputAnalyserRef.current = outputAnalyser;
 
-      // 3. Connect WebSocket to /api/live
+      // 3. Connect WebSocket to /api/live or external WebSocket server
+      const configuredWsUrl = (import.meta as any).env?.VITE_WEBSOCKET_URL?.trim();
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/api/live`;
+      const defaultWsUrl = `${protocol}//${window.location.host}/api/live`;
+      const wsUrl = configuredWsUrl || defaultWsUrl;
       console.log('[WebSocket Voice] Connecting to:', wsUrl);
+
+      let wsResolved = false;
+      let wsConnectionTimer: any = null;
 
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
+      // Fallback timer: if WebSocket does not connect in 3.5 seconds (e.g. on Vercel), switch to Smart Voice Mode
+      wsConnectionTimer = setTimeout(() => {
+        if (!wsResolved && ws.readyState !== WebSocket.OPEN) {
+          wsResolved = true;
+          console.warn('[WebSocket Voice] Connection timed out on this host. Activating Smart Voice Mode...');
+          try {
+            ws.close();
+          } catch (e) {}
+          startFallbackVoiceSession();
+        }
+      }, 3500);
+
       ws.onopen = () => {
-        console.log('[WebSocket Voice] WebSocket connected');
+        wsResolved = true;
+        if (wsConnectionTimer) clearTimeout(wsConnectionTimer);
+        console.log('[WebSocket Voice] WebSocket connected to Gemini Live');
+        setIsFallbackVoiceMode(false);
+        isFallbackVoiceModeRef.current = false;
         setIsVoiceConnected(true);
         setIsConnectingVoice(false);
         setVoiceStatus('Live Call Connected • Aryan Sun Rahe Hain');
@@ -388,14 +614,25 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
       };
 
       ws.onerror = (event) => {
-        console.error('[WebSocket Voice] WebSocket error:', event);
-        setVoiceError('WebSocket connection error. Please check network connectivity.');
-        setIsConnectingVoice(false);
+        console.warn('[WebSocket Voice] WebSocket connection error on this host:', event);
+        if (!wsResolved) {
+          wsResolved = true;
+          if (wsConnectionTimer) clearTimeout(wsConnectionTimer);
+          try {
+            ws.close();
+          } catch (e) {}
+          startFallbackVoiceSession();
+        } else {
+          setVoiceError('WebSocket connection interrupted.');
+          setIsConnectingVoice(false);
+        }
       };
 
       ws.onclose = () => {
         console.log('[WebSocket Voice] WebSocket connection closed');
-        stopVoiceSession();
+        if (!isFallbackVoiceModeRef.current) {
+          stopVoiceSession();
+        }
       };
 
       // 4. Capture microphone and stream 16kHz PCM to WebSocket
@@ -413,7 +650,12 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
       const ratio = inputSampleRate / targetSampleRate;
 
       processor.onaudioprocess = (e) => {
-        if (isMutedRef.current || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        if (
+          isMutedRef.current ||
+          isFallbackVoiceModeRef.current ||
+          !wsRef.current ||
+          wsRef.current.readyState !== WebSocket.OPEN
+        ) {
           return;
         }
 
@@ -441,20 +683,39 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
         wsRef.current.send(JSON.stringify({ type: 'audio', audio: b64Audio }));
       };
     } catch (err: any) {
-      console.error('[WebSocket Voice] Start failed:', err);
+      console.error('[Voice Session Start failed]:', err);
       setIsConnectingVoice(false);
       setIsVoiceConnected(false);
       if (err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError') {
         setVoiceError('Microphone permission was denied. Please allow microphone access to use live voice.');
       } else {
-        setVoiceError(err?.message || 'Failed to start Live Voice session. Please verify connection.');
+        setVoiceError(err?.message || 'Failed to start voice call session.');
       }
     }
   };
 
-  // Helper: Send Text query directly to Gemini Live over WebSocket
+  // Helper: Send Text query directly to Gemini Live over WebSocket or via Smart Voice Mode
   const sendLiveTextMessage = (queryText: string) => {
     if (!queryText.trim()) return;
+
+    if (isFallbackVoiceModeRef.current || isFallbackVoiceMode) {
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+      setIsAiSpeaking(false);
+      setVoiceTranscript(`Aap: "${queryText}"`);
+      setVoiceStatus('Aryan soch rahe hain...');
+      streamChatQuery(queryText, messages, (chunk, acc) => {
+        setVoiceTranscript(`Aryan: "${acc}"`);
+      })
+        .then((aiResponse) => {
+          speakFallbackAudio(aiResponse);
+        })
+        .catch(() => {
+          speakFallbackAudio('Maaf kijiye, main connect nahi kar paya. Dubara boliye?');
+        });
+      return;
+    }
 
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       // Interrupt current speech
@@ -477,62 +738,12 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
         setTimeout(() => {
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type: 'text', text: queryText }));
+          } else if (isFallbackVoiceModeRef.current) {
+            sendLiveTextMessage(queryText);
           }
         }, 800);
       });
     }
-  };
-
-  // Helper: Core HTTP Streaming for Text Advisory tab
-  const streamChatQuery = async (
-    query: string,
-    historyList: Message[],
-    onChunk: (chunk: string, accumulated: string) => void
-  ): Promise<string> => {
-    const response = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: query,
-        history: historyList.slice(-6).map((m) => ({ role: m.role, content: m.content })),
-        propertyContext: selectedProperty
-          ? `${selectedProperty.name} in ${selectedProperty.location}, ${selectedProperty.bhk}, ${selectedProperty.price}`
-          : undefined,
-      }),
-    });
-
-    if (!response.ok) {
-      let errMsg = 'Failed to connect to Amit Sir’s PA.';
-      try {
-        const errJson = await response.json();
-        if (errJson?.error) errMsg = errJson.error;
-      } catch (e) {
-        const errTxt = await response.text().catch(() => '');
-        if (errTxt) errMsg = errTxt;
-      }
-      throw new Error(errMsg);
-    }
-
-    if (!response.body) {
-      const text = await response.text();
-      onChunk(text, text);
-      return text;
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let fullAccumulated = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      fullAccumulated += chunk;
-      onChunk(chunk, fullAccumulated);
-    }
-
-    fullAccumulated += decoder.decode();
-    return fullAccumulated;
   };
 
   // Send Text Query in Chat Tab using HTTP Streaming chunk-by-chunk
@@ -621,7 +832,7 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                   </h3>
                   <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#C5A059]/20 text-[#E6C687] border border-[#C5A059]/40 uppercase tracking-wider">
                     <Sparkles className="w-2.5 h-2.5 text-[#E6C687]" />
-                    WebSocket Live Voice
+                    {isFallbackVoiceMode ? 'Voice Mode (Vercel Serverless)' : 'WebSocket Live Voice'}
                   </span>
                 </div>
                 <p className="text-xs text-slate-300 flex items-center gap-1.5 mt-0.5">
@@ -656,7 +867,7 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                 <Radio className={`w-3.5 h-3.5 ${activeTab === 'voice' ? 'text-[#002347]' : 'text-[#C5A059]'}`} />
                 <span>Live Voice Call</span>
                 <span className="text-[9px] px-1.5 py-0.5 rounded bg-black/25 text-white font-mono uppercase">
-                  WebSocket
+                  {isFallbackVoiceMode ? 'Voice' : 'WebSocket'}
                 </span>
               </button>
 
@@ -749,6 +960,9 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                       startVoiceSession();
                     } else if (isAiSpeaking) {
                       // Interrupt Aryan immediately
+                      if (typeof window !== 'undefined' && window.speechSynthesis) {
+                        window.speechSynthesis.cancel();
+                      }
                       for (const s of activeSourcesRef.current) {
                         try {
                           s.stop();
@@ -812,7 +1026,7 @@ export const AIPersonalAssistantModal: React.FC<AIPersonalAssistantModalProps> =
                         Tap to Call
                       </span>
                       <span className="text-[10px] font-medium text-[#E6C687] tracking-tight">
-                        WebSocket Voice
+                        {isFallbackVoiceMode ? 'Voice Mode' : 'Live Voice Call'}
                       </span>
                     </>
                   )}

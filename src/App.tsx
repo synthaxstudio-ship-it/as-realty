@@ -10,9 +10,7 @@ import { ContactSection } from './components/ContactSection';
 import { Footer } from './components/Footer';
 import { WhatsAppBookingModal } from './components/WhatsAppBookingModal';
 import { PropertyDetailModal } from './components/PropertyDetailModal';
-import { FloatingWhatsApp } from './components/FloatingWhatsApp';
 import { AIPersonalAssistantModal } from './components/AIPersonalAssistantModal';
-import { SupabaseBackendModal } from './components/SupabaseBackendModal';
 import { AuthProvider } from './context/AuthContext';
 import { AuthModal } from './components/AuthModal';
 
@@ -29,7 +27,6 @@ function AppContent() {
   const [isBookingOpen, setIsBookingOpen] = useState(false);
   const [selectedBookingPropertyName, setSelectedBookingPropertyName] = useState<string>('');
   const [detailProperty, setDetailProperty] = useState<Property | null>(null);
-  const [isSupabaseModalOpen, setIsSupabaseModalOpen] = useState(false);
 
   // AI Personal Assistant Modal state
   const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
@@ -91,7 +88,6 @@ function AppContent() {
         onOpenBooking={() => handleOpenBooking()}
         onScrollToSection={handleScrollToSection}
         onOpenAiAssistant={(mode) => handleOpenAiAssistant(null, mode || 'voice')}
-        onOpenSupabase={() => setIsSupabaseModalOpen(true)}
       />
 
       {/* Main Content Area */}
@@ -129,13 +125,6 @@ function AppContent() {
       <Footer
         onScrollToSection={handleScrollToSection}
         onOpenBooking={() => handleOpenBooking()}
-        onOpenSupabase={() => setIsSupabaseModalOpen(true)}
-      />
-
-      {/* Sticky Bottom-Right WhatsApp & AI PA Quick Contact Widget */}
-      <FloatingWhatsApp
-        onOpenBooking={() => handleOpenBooking()}
-        onOpenAiAssistant={(mode) => handleOpenAiAssistant(null, mode || 'voice')}
       />
 
       {/* Interactive WhatsApp Booking Modal Component */}
@@ -161,12 +150,6 @@ function AppContent() {
         selectedProperty={aiAssistantProperty}
         initialMode={aiAssistantInitialMode}
         onOpenBooking={(name) => handleOpenBooking(name)}
-      />
-
-      {/* Supabase CRM & Database Desk Modal */}
-      <SupabaseBackendModal
-        isOpen={isSupabaseModalOpen}
-        onClose={() => setIsSupabaseModalOpen(false)}
       />
 
       {/* Supabase VIP Authentication Modal */}
