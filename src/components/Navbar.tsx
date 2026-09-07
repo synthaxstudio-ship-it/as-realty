@@ -1,16 +1,52 @@
-import React, { useState, useEffect } from 'react';
-import { Menu, X, Phone, MessageSquare, Building, ShieldCheck, ChevronRight, Instagram, Radio, Sparkles } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Menu,
+  X,
+  Phone,
+  MessageSquare,
+  Building,
+  ShieldCheck,
+  ChevronRight,
+  Instagram,
+  Radio,
+  Sparkles,
+  Database,
+  User as UserIcon,
+  LogOut,
+  ChevronDown,
+  Lock,
+} from 'lucide-react';
 import { COMPANY_DETAILS } from '../data/properties';
+import { useAuth } from '../context/AuthContext';
 
 interface NavbarProps {
   onOpenBooking: (propertyName?: string) => void;
   onScrollToSection: (sectionId: string) => void;
   onOpenAiAssistant: (mode?: 'voice' | 'text') => void;
+  onOpenSupabase?: () => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ onOpenBooking, onScrollToSection, onOpenAiAssistant }) => {
+export const Navbar: React.FC<NavbarProps> = ({
+  onOpenBooking,
+  onScrollToSection,
+  onOpenAiAssistant,
+  onOpenSupabase,
+}) => {
+  const { user, profile, openAuthModal, logout } = useAuth();
   const [isScrolled, setIsScrolled] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [userDropdownOpen, setUserDropdownOpen] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setUserDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, []);
 
   useEffect(() => {
     const handleScroll = () => {
@@ -124,6 +160,108 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenBooking, onScrollToSection
             <Building className="w-3.5 h-3.5 text-[#002347]" />
             <span>Meeting</span>
           </button>
+
+          {onOpenSupabase && (
+            <button
+              id="nav-supabase-desk-btn"
+              onClick={onOpenSupabase}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#001730] border border-emerald-500/40 hover:border-emerald-400 text-xs font-semibold text-emerald-300 hover:text-white transition-all cursor-pointer"
+              title="Open Supabase CRM Desk"
+            >
+              <Database className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="hidden lg:inline">Supabase CRM</span>
+            </button>
+          )}
+
+          {/* VIP Client Auth Button / Dropdown */}
+          {user ? (
+            <div className="relative" ref={userMenuRef}>
+              <button
+                id="nav-user-profile-button"
+                onClick={() => setUserDropdownOpen(!userDropdownOpen)}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#001730] border border-[#C5A059]/60 hover:border-[#E6C687] text-slate-200 transition-all cursor-pointer"
+                title="VIP Client Account Menu"
+              >
+                <div className="w-6 h-6 rounded-full bg-gradient-to-br from-[#C5A059] to-[#E6C687] text-[#002347] font-bold text-xs flex items-center justify-center">
+                  {(profile?.full_name || user.email || 'U').charAt(0).toUpperCase()}
+                </div>
+                <span className="hidden md:inline text-xs font-semibold max-w-[100px] truncate">
+                  {profile?.full_name || user.email?.split('@')[0]}
+                </span>
+                <ChevronDown className={`w-3.5 h-3.5 text-[#C5A059] transition-transform ${userDropdownOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {userDropdownOpen && (
+                <div className="absolute right-0 mt-2 w-64 bg-white border border-slate-200 rounded-xl shadow-2xl py-2 z-50 text-slate-800 animate-fadeIn">
+                  <div className="px-4 py-3 border-b border-slate-100 bg-[#F8F9FA]">
+                    <span className="text-[10px] uppercase tracking-wider font-bold text-[#C5A059] block">
+                      VIP Client Member
+                    </span>
+                    <p className="text-xs font-bold text-slate-900 truncate">
+                      {profile?.full_name || 'Valued Client'}
+                    </p>
+                    <p className="text-[11px] text-slate-500 font-mono truncate">
+                      {user.email}
+                    </p>
+                    {profile?.phone && (
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        {profile.phone}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="py-1">
+                    <button
+                      onClick={() => {
+                        setUserDropdownOpen(false);
+                        onOpenBooking();
+                      }}
+                      className="w-full px-4 py-2 text-left text-xs font-medium hover:bg-slate-50 flex items-center gap-2.5 text-slate-700 cursor-pointer"
+                    >
+                      <Building className="w-3.5 h-3.5 text-[#C5A059]" />
+                      <span>Schedule VIP Site Visit</span>
+                    </button>
+
+                    {onOpenSupabase && (
+                      <button
+                        onClick={() => {
+                          setUserDropdownOpen(false);
+                          onOpenSupabase();
+                        }}
+                        className="w-full px-4 py-2 text-left text-xs font-medium hover:bg-slate-50 flex items-center gap-2.5 text-slate-700 cursor-pointer"
+                      >
+                        <Database className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Supabase CRM Desk</span>
+                      </button>
+                    )}
+
+                    <div className="border-t border-slate-100 my-1" />
+
+                    <button
+                      onClick={async () => {
+                        setUserDropdownOpen(false);
+                        await logout();
+                      }}
+                      className="w-full px-4 py-2 text-left text-xs font-medium hover:bg-red-50 flex items-center gap-2.5 text-red-600 cursor-pointer"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>Sign Out</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <button
+              id="nav-signin-button"
+              onClick={() => openAuthModal('login')}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#001730] border border-[#C5A059]/40 hover:border-[#E6C687] text-xs font-semibold text-slate-200 hover:text-[#E6C687] transition-all cursor-pointer group"
+              title="Sign In or Register VIP Account"
+            >
+              <Lock className="w-3.5 h-3.5 text-[#C5A059] group-hover:scale-110 transition-transform" />
+              <span>Sign In</span>
+            </button>
+          )}
         </div>
 
         {/* Mobile Hamburger Button */}
@@ -204,6 +342,62 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenBooking, onScrollToSection
               <Instagram className="w-4 h-4 text-[#E6C687]" />
               <span>Follow us on Instagram (@asrealty.official)</span>
             </a>
+
+            {onOpenSupabase && (
+              <button
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  onOpenSupabase();
+                }}
+                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-[#001730] border border-emerald-500/40 text-emerald-300 font-semibold text-xs"
+              >
+                <Database className="w-4 h-4 text-emerald-400" />
+                <span>Supabase CRM &amp; Database Desk</span>
+              </button>
+            )}
+
+            {/* Mobile Auth Button */}
+            {user ? (
+              <div className="p-3 rounded-xl bg-[#001730] border border-[#C5A059]/40 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wider font-bold text-[#C5A059] block">
+                      Logged In VIP Client
+                    </span>
+                    <span className="text-xs font-bold text-white block">
+                      {profile?.full_name || 'Client'}
+                    </span>
+                    <span className="text-[11px] text-slate-400 font-mono block">
+                      {user.email}
+                    </span>
+                  </div>
+                  <div className="w-8 h-8 rounded-full bg-[#C5A059] text-[#002347] font-bold text-xs flex items-center justify-center">
+                    {(profile?.full_name || user.email || 'U').charAt(0).toUpperCase()}
+                  </div>
+                </div>
+                <button
+                  onClick={async () => {
+                    setMobileMenuOpen(false);
+                    await logout();
+                  }}
+                  className="w-full py-2 rounded-lg bg-red-950/40 border border-red-500/30 text-red-300 hover:text-red-200 text-xs font-semibold flex items-center justify-center gap-2"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Sign Out</span>
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  openAuthModal('login');
+                }}
+                className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-[#001730] border border-[#C5A059]/60 text-[#E6C687] font-bold text-xs uppercase tracking-wider"
+              >
+                <Lock className="w-4 h-4 text-[#C5A059]" />
+                <span>VIP Client Portal (Sign In / Register)</span>
+              </button>
+            )}
           </div>
         </div>
       )}

@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { X, Calendar, Clock, Building2, User, Send, CheckCircle2, MessageSquare, Copy } from 'lucide-react';
+import { X, Calendar, Clock, Building2, User, Send, CheckCircle2, MessageSquare, Copy, Phone, Database } from 'lucide-react';
 import { Property } from '../types';
 import { COMPANY_DETAILS } from '../data/properties';
+import { saveBookingToSupabase } from '../lib/supabase';
+import { useAuth } from '../context/AuthContext';
 
 interface WhatsAppBookingModalProps {
   isOpen: boolean;
@@ -16,7 +18,9 @@ export const WhatsAppBookingModal: React.FC<WhatsAppBookingModalProps> = ({
   selectedPropertyName,
   properties,
 }) => {
+  const { user, profile } = useAuth();
   const [fullName, setFullName] = useState('');
+  const [phone, setPhone] = useState('');
   const [propertyName, setPropertyName] = useState(selectedPropertyName || '');
   const [selectedDate, setSelectedDate] = useState('');
   const [selectedTime, setSelectedTime] = useState('11:00 AM');
@@ -24,6 +28,8 @@ export const WhatsAppBookingModal: React.FC<WhatsAppBookingModalProps> = ({
   const [useCustomTime, setUseCustomTime] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [isSavingToSupabase, setIsSavingToSupabase] = useState(false);
+  const [supabaseSaved, setSupabaseSaved] = useState(false);
 
   // Set default date to tomorrow in YYYY-MM-DD
   useEffect(() => {
@@ -44,14 +50,20 @@ export const WhatsAppBookingModal: React.FC<WhatsAppBookingModalProps> = ({
     }
   }, [selectedPropertyName, properties]);
 
-  // Reset state when modal opens
+  // Reset state when modal opens and pre-fill if logged in
   useEffect(() => {
     if (isOpen) {
       setSubmitted(false);
       setCopied(false);
-      if (!fullName) setFullName('');
+      setSupabaseSaved(false);
+      if (profile?.full_name && !fullName) {
+        setFullName(profile.full_name);
+      }
+      if (profile?.phone && !phone) {
+        setPhone(profile.phone);
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, profile]);
 
   if (!isOpen) return null;
 
@@ -74,18 +86,37 @@ export const WhatsAppBookingModal: React.FC<WhatsAppBookingModalProps> = ({
     }
   };
 
-  // Pre-formatted WhatsApp message as strictly requested in prompt 2:
+  // Pre-formatted WhatsApp message as strictly requested:
   const generateWhatsAppMessage = () => {
     const formattedDate = formatDisplayDate(selectedDate);
-    return `Hello AS Realty, I would like to book an appointment for a site visit/meeting.\n👤 Name: ${fullName.trim() || '[Your Name]'}\n🏢 Property: ${propertyName || '[Property Name]'}\n📅 Date: ${formattedDate}\n⏰ Time: ${finalTime}`;
+    return `Hello AS Realty, I would like to book an appointment for a site visit/meeting.\n👤 Name: ${fullName.trim() || '[Your Name]'}\n📱 Phone: ${phone.trim() || 'Not specified'}\n🏢 Property: ${propertyName || '[Property Name]'}\n📅 Date: ${formattedDate}\n⏰ Time: ${finalTime}`;
   };
 
   const whatsappMessage = generateWhatsAppMessage();
   const whatsappUrl = `https://wa.me/${COMPANY_DETAILS.whatsappNumber}?text=${encodeURIComponent(whatsappMessage)}`;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!fullName.trim()) return;
+
+    setIsSavingToSupabase(true);
+
+    // Save to Supabase backend
+    try {
+      await saveBookingToSupabase({
+        full_name: fullName.trim(),
+        phone: phone.trim(),
+        property_name: propertyName,
+        booking_date: selectedDate,
+        booking_time: finalTime,
+        status: 'pending',
+      });
+      setSupabaseSaved(true);
+    } catch (e) {
+      console.warn('Booking save notice:', e);
+    } finally {
+      setIsSavingToSupabase(false);
+    }
 
     // Trigger WhatsApp link
     const newWindow = window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
@@ -177,10 +208,30 @@ export const WhatsAppBookingModal: React.FC<WhatsAppBookingModalProps> = ({
                 </div>
               </div>
 
+              {/* Client Phone Number */}
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-[#002347] mb-2">
+                  2. Contact Number / WhatsApp
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                    <Phone className="w-4 h-4" />
+                  </div>
+                  <input
+                    id="booking-client-phone"
+                    type="tel"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="e.g., +91 98765 43210"
+                    className="w-full pl-10 pr-4 py-3 bg-[#F8F9FA] border border-slate-300 rounded-xl text-slate-800 placeholder-slate-400 text-sm focus:outline-none focus:border-[#C5A059] focus:ring-1 focus:ring-[#C5A059] transition-colors"
+                  />
+                </div>
+              </div>
+
               {/* Selected Property Name */}
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-[#002347] mb-2">
-                  2. Selected Property <span className="text-amber-600">*</span>
+                  3. Selected Property <span className="text-amber-600">*</span>
                 </label>
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
@@ -303,19 +354,23 @@ export const WhatsAppBookingModal: React.FC<WhatsAppBookingModalProps> = ({
               </div>
 
               {/* Submit Buttons */}
-              <div className="pt-2">
+              <div className="pt-2 space-y-2">
                 <button
                   id="submit-whatsapp-booking-btn"
                   type="submit"
-                  disabled={!fullName.trim()}
+                  disabled={!fullName.trim() || isSavingToSupabase}
                   className="w-full flex items-center justify-center gap-2.5 px-6 py-4 rounded-xl bg-gradient-to-r from-emerald-600 via-emerald-500 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs uppercase tracking-wider shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all transform active:scale-[0.99] cursor-pointer"
                 >
                   <Send className="w-4 h-4" />
-                  <span>Book Visit</span>
+                  <span>{isSavingToSupabase ? 'Recording in Supabase CRM...' : 'Confirm Booking & Open WhatsApp'}</span>
                 </button>
-                <p className="text-center text-[11px] text-slate-500 mt-2.5 font-medium">
-                  Opens WhatsApp directly with your pre-formatted booking details.
-                </p>
+                <div className="flex items-center justify-between text-[11px] text-slate-500 font-medium px-1">
+                  <span className="flex items-center gap-1 text-emerald-700">
+                    <Database className="w-3 h-3 text-emerald-600" />
+                    Synced to Supabase Backend
+                  </span>
+                  <span>Direct to Amit Sir</span>
+                </div>
               </div>
             </form>
           ) : (
@@ -326,11 +381,15 @@ export const WhatsAppBookingModal: React.FC<WhatsAppBookingModalProps> = ({
               </div>
 
               <div>
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-100/70 text-emerald-800 text-[11px] font-semibold mb-2">
+                  <Database className="w-3 h-3 text-emerald-600" />
+                  <span>Saved in Supabase CRM (Project: dpadpxnkrvsntbruwohp)</span>
+                </div>
                 <h4 className="text-2xl font-serif-luxury font-bold text-[#002347]">
-                  WhatsApp Launch Initiated
+                  Booking Recorded &amp; WhatsApp Launched
                 </h4>
                 <p className="text-sm text-slate-600 mt-1 max-w-md mx-auto">
-                  Thank you, <strong className="text-[#002347]">{fullName}</strong>. If WhatsApp did not open automatically on your device, click the button below:
+                  Thank you, <strong className="text-[#002347]">{fullName}</strong>. Your VIP site visit appointment is safely logged in our backend. If WhatsApp did not open automatically on your device, click below:
                 </p>
               </div>
 

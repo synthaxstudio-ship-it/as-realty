@@ -1,13 +1,14 @@
 import React from 'react';
 import { COMPANY_DETAILS } from '../data/properties';
-import { ShieldCheck, MessageSquare, ArrowUp, Instagram, Linkedin, Youtube } from 'lucide-react';
+import { ShieldCheck, MessageSquare, ArrowUp, Instagram, Linkedin, Youtube, Database } from 'lucide-react';
 
 interface FooterProps {
   onScrollToSection: (sectionId: string) => void;
   onOpenBooking: () => void;
+  onOpenSupabase?: () => void;
 }
 
-export const Footer: React.FC<FooterProps> = ({ onScrollToSection, onOpenBooking }) => {
+export const Footer: React.FC<FooterProps> = ({ onScrollToSection, onOpenBooking, onOpenSupabase }) => {
   const scrollToTop = () => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -221,7 +222,19 @@ export const Footer: React.FC<FooterProps> = ({ onScrollToSection, onOpenBooking
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-2 border-t border-white/10 text-[11px] text-slate-400">
             <span>© {new Date().getFullYear()} AS Realty. All Rights Reserved. Owned by Amit Shivpeth.</span>
-            <span>Crafted for Discerning Connoisseurs of Architecture.</span>
+            <div className="flex items-center gap-3">
+              {onOpenSupabase && (
+                <button
+                  onClick={onOpenSupabase}
+                  className="flex items-center gap-1 text-emerald-400 hover:text-emerald-300 transition-colors font-mono cursor-pointer"
+                  title="Open Supabase Cloud Database"
+                >
+                  <Database className="w-3 h-3 text-emerald-400" />
+                  <span>Supabase: dpadpxnkrvsntbruwohp</span>
+                </button>
+              )}
+              <span>Crafted for Discerning Connoisseurs of Architecture.</span>
+            </div>
           </div>
         </div>
       </div>

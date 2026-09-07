@@ -1,20 +1,51 @@
-import React, { useState } from 'react';
-import { Phone, Mail, MapPin, MessageSquare, Clock, Send, ShieldCheck, CheckCircle2, Instagram } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Phone, Mail, MapPin, MessageSquare, Clock, Send, ShieldCheck, CheckCircle2, Instagram, Database } from 'lucide-react';
 import { COMPANY_DETAILS } from '../data/properties';
+import { saveInquiryToSupabase } from '../lib/supabase';
+import { useAuth } from '../context/AuthContext';
 
 interface ContactSectionProps {
   onOpenBooking: () => void;
 }
 
 export const ContactSection: React.FC<ContactSectionProps> = ({ onOpenBooking }) => {
+  const { user, profile } = useAuth();
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [interest, setInterest] = useState('Civil Lines Grand Sky Penthouses');
   const [message, setMessage] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [savedInSupabase, setSavedInSupabase] = useState(false);
 
-  const handleDirectWhatsAppSubmit = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (profile?.full_name && !name) {
+      setName(profile.full_name);
+    }
+    if (profile?.phone && !phone) {
+      setPhone(profile.phone);
+    }
+  }, [profile]);
+
+  const handleDirectWhatsAppSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
+
+    setIsSubmitting(true);
+
+    try {
+      await saveInquiryToSupabase({
+        name: name.trim(),
+        phone: phone.trim(),
+        interest,
+        message: message.trim(),
+        source: 'Website Advisory Request',
+      });
+      setSavedInSupabase(true);
+    } catch (err) {
+      console.warn('Inquiry save notice:', err);
+    } finally {
+      setIsSubmitting(false);
+    }
 
     const formattedMessage = `Hello AS Realty,\nI would like to inquire regarding luxury real estate advisory with Amit Shivpeth.\n👤 Name: ${name.trim()}\n📱 Phone: ${phone.trim() || 'Not specified'}\n🏢 Interest: ${interest}\n💬 Message: ${message.trim() || 'Please arrange a call back.'}`;
     const url = `https://wa.me/${COMPANY_DETAILS.whatsappNumber}?text=${encodeURIComponent(formattedMessage)}`;
@@ -208,15 +239,22 @@ export const ContactSection: React.FC<ContactSectionProps> = ({ onOpenBooking })
                 />
               </div>
 
-              <div className="pt-2">
+              <div className="pt-2 space-y-2">
                 <button
                   type="submit"
-                  disabled={!name.trim()}
+                  disabled={!name.trim() || isSubmitting}
                   className="w-full flex items-center justify-center gap-2.5 px-6 py-4 rounded-xl bg-gradient-to-r from-emerald-600 via-emerald-500 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs uppercase tracking-wider shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                 >
                   <MessageSquare className="w-4 h-4" />
-                  <span>Send WhatsApp Inquiry (+91 87883 75434)</span>
+                  <span>{isSubmitting ? 'Syncing to Supabase CRM...' : 'Send WhatsApp Inquiry (+91 87883 75434)'}</span>
                 </button>
+
+                {savedInSupabase && (
+                  <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center justify-center gap-2">
+                    <Database className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Inquiry safely archived in Supabase database</span>
+                  </div>
+                )}
               </div>
 
               <div className="text-center pt-2">

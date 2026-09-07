@@ -12,8 +12,11 @@ import { WhatsAppBookingModal } from './components/WhatsAppBookingModal';
 import { PropertyDetailModal } from './components/PropertyDetailModal';
 import { FloatingWhatsApp } from './components/FloatingWhatsApp';
 import { AIPersonalAssistantModal } from './components/AIPersonalAssistantModal';
+import { SupabaseBackendModal } from './components/SupabaseBackendModal';
+import { AuthProvider } from './context/AuthContext';
+import { AuthModal } from './components/AuthModal';
 
-export default function App() {
+function AppContent() {
   const [properties] = useState<Property[]>(PROPERTIES);
   const [filters, setFilters] = useState<FilterState>({
     priceRange: 'all',
@@ -26,6 +29,7 @@ export default function App() {
   const [isBookingOpen, setIsBookingOpen] = useState(false);
   const [selectedBookingPropertyName, setSelectedBookingPropertyName] = useState<string>('');
   const [detailProperty, setDetailProperty] = useState<Property | null>(null);
+  const [isSupabaseModalOpen, setIsSupabaseModalOpen] = useState(false);
 
   // AI Personal Assistant Modal state
   const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
@@ -87,6 +91,7 @@ export default function App() {
         onOpenBooking={() => handleOpenBooking()}
         onScrollToSection={handleScrollToSection}
         onOpenAiAssistant={(mode) => handleOpenAiAssistant(null, mode || 'voice')}
+        onOpenSupabase={() => setIsSupabaseModalOpen(true)}
       />
 
       {/* Main Content Area */}
@@ -124,6 +129,7 @@ export default function App() {
       <Footer
         onScrollToSection={handleScrollToSection}
         onOpenBooking={() => handleOpenBooking()}
+        onOpenSupabase={() => setIsSupabaseModalOpen(true)}
       />
 
       {/* Sticky Bottom-Right WhatsApp & AI PA Quick Contact Widget */}
@@ -156,6 +162,23 @@ export default function App() {
         initialMode={aiAssistantInitialMode}
         onOpenBooking={(name) => handleOpenBooking(name)}
       />
+
+      {/* Supabase CRM & Database Desk Modal */}
+      <SupabaseBackendModal
+        isOpen={isSupabaseModalOpen}
+        onClose={() => setIsSupabaseModalOpen(false)}
+      />
+
+      {/* Supabase VIP Authentication Modal */}
+      <AuthModal />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   );
 }
